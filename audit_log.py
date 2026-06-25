@@ -1,0 +1,132 @@
+"""
+Audit log: SQLite-backed, structured.
+
+Every attribution decision and every appeal writes a row here. See planning.md
+§4 ("What the system does on receipt") for the schema rationale — the table
+supports the reviewer view without needing a join because v1 keeps things
+simple, but the schema is wide enough to grow.
+
+In M3 only `entry_type='decision'` rows are written. M4 will populate
+`llm_score`. M5 will add `entry_type='appeal'` rows and a status update path.
+"""
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from typing import Optional, Dict, Any, List
+
+DB_PATH = "provenance_guard.db"
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS audit_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_type          TEXT NOT NULL,            -- 'decision' or 'appeal'
+    content_id          TEXT NOT NULL,
+    creator_id          TEXT,
+    timestamp           TEXT NOT NULL,            -- ISO-8601 UTC
+
+    -- decision fields (NULL for appeal rows)
+    attribution         TEXT,                     -- 'likely_human' | 'uncertain' | 'likely_ai'
+    confidence          REAL,                     -- combined score in [0, 1]
+    stylometric_score   REAL,
+    llm_score           REAL,                     -- populated starting M4
+    features_json       TEXT,                     -- raw stylometric features
+    label               TEXT,
+    status              TEXT,                     -- 'classified' | 'under_review'
+
+    -- appeal fields (NULL for decision rows)
+    appeal_id           TEXT,
+    appeal_reasoning    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_content_id ON audit_log(content_id);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+"""
+
+
+@contextmanager
+def _conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    """Create the schema if it doesn't exist. Safe to call on every startup."""
+    with _conn() as c:
+        c.executescript(SCHEMA)
+
+
+def log_decision(
+    *,
+    content_id: str,
+    creator_id: str,
+    timestamp: str,
+    attribution: str,
+    confidence: float,
+    stylometric_score: float,
+    stylometric_features: Dict[str, Any],
+    label: str,
+    status: str = "classified",
+    llm_score: Optional[float] = None,
+) -> None:
+    """Insert a decision row. llm_score is None in M3, populated in M4."""
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO audit_log (
+                entry_type, content_id, creator_id, timestamp,
+                attribution, confidence, stylometric_score, llm_score,
+                features_json, label, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "decision", content_id, creator_id, timestamp,
+                attribution, confidence, stylometric_score, llm_score,
+                json.dumps(stylometric_features), label, status,
+            ),
+        )
+
+
+def get_recent_entries(limit: int = 50) -> List[Dict[str, Any]]:
+    """Return audit entries newest-first. Strips NULLs for cleaner output."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(row)
+            # Inline the parsed features and drop the raw JSON column.
+            if entry.get("features_json"):
+                entry["features"] = json.loads(entry["features_json"])
+            entry.pop("features_json", None)
+            # Drop None-valued fields so different entry_types stay readable.
+            entry = {k: v for k, v in entry.items() if v is not None}
+            result.append(entry)
+        return result
+
+
+def get_submission(content_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch the decision row for one content_id, or None if not found."""
+    with _conn() as c:
+        row = c.execute(
+            """SELECT * FROM audit_log
+               WHERE content_id = ? AND entry_type = 'decision'
+               ORDER BY id DESC LIMIT 1""",
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        entry = dict(row)
+        if entry.get("features_json"):
+            entry["features"] = json.loads(entry["features_json"])
+            entry.pop("features_json", None)
+        return entry
