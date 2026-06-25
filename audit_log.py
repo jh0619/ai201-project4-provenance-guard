@@ -154,3 +154,50 @@ def get_submission(content_id: str) -> Optional[Dict[str, Any]]:
             entry["features"] = json.loads(entry["features_json"])
             entry.pop("features_json", None)
         return entry
+
+
+def log_appeal(
+    *,
+    appeal_id: str,
+    content_id: str,
+    creator_id: str,
+    timestamp: str,
+    reasoning: str,
+) -> None:
+    """Insert an appeal row (M5).
+
+    The appeal row is separate from the original decision row so that the
+    original verdict, scores, and label are preserved unmodified. The
+    decision row's `status` is updated via update_status() in the same
+    transaction-equivalent sequence (called from app.py).
+    """
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO audit_log (
+                entry_type, content_id, creator_id, timestamp,
+                appeal_id, appeal_reasoning, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "appeal", content_id, creator_id, timestamp,
+                appeal_id, reasoning, "under_review",
+            ),
+        )
+
+
+def update_status(content_id: str, new_status: str) -> int:
+    """Update the status field on the most recent decision row.
+
+    Returns the number of rows affected (0 if content_id not found).
+    Only modifies the `status` column — the original verdict, scores,
+    and label remain unchanged per planning.md §4.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            """UPDATE audit_log
+               SET status = ?
+               WHERE content_id = ? AND entry_type = 'decision'""",
+            (new_status, content_id),
+        )
+        return cur.rowcount

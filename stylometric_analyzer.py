@@ -106,10 +106,12 @@ def analyze_stylometric(text: str) -> Dict[str, Any]:
 
     # ---- Normalize to AI-likelihood contributions in [0, 1] ----
     # Burstiness: 8+ → 0 (very human), 0 → 1 (very AI)
-    burstiness_ai = max(0.0, min(1.0, (BURSTINESS_HUMAN_ANCHOR - burstiness) / BURSTINESS_HUMAN_ANCHOR))
+    burstiness_ai = max(0.0, min(1.0,
+        (BURSTINESS_HUMAN_ANCHOR - burstiness) / BURSTINESS_HUMAN_ANCHOR))
 
     # TTR: 0.65+ → 0 (very human), 0.40 → 1 (very AI)
-    ttr_ai = max(0.0, min(1.0, (TTR_HUMAN_ANCHOR - ttr) / TTR_RANGE))
+    ttr_ai = max(0.0, min(1.0,
+        (TTR_HUMAN_ANCHOR - ttr) / TTR_RANGE))
 
     # Combine: simple average of the two normalized features.
     # If the text is too short for burstiness to be reliable, fall back to TTR only.

@@ -1,16 +1,17 @@
 """
 Provenance Guard — Flask app.
 
-M4 scope: POST /submit now runs both signals (stylometric + LLM),
-         combines them via confidence_scorer, and maps the combined
-         score to a verdict tier. If the LLM signal is unavailable
-         (no API key, network failure, parse error) the system falls
-         back to stylometric-only and FORCES the verdict to 'uncertain'
-         — a single signal isn't trustworthy enough to make a confident
-         call. See planning.md §1 ("Failure mode handling").
+M5: full production layer.
+   - POST /submit returns the verbatim transparency label (3 variants
+     mapped from the verdict tier per planning.md §3).
+   - POST /appeal accepts content_id + creator_reasoning, updates the
+     submission status to 'under_review', writes an appeal row to the
+     audit log (original decision preserved unmodified).
+   - Rate limit on /submit: 10/min, 100/day (rationale in README).
+   - GET /log returns the audit log newest-first for transparency.
 
-         M5 will replace the placeholder label with the three §3
-         variants and add POST /appeal.
+Fallback behavior is unchanged from M4: if Groq is unavailable, the
+LLM signal is skipped and the verdict is forced to 'uncertain'.
 """
 
 import uuid
@@ -23,22 +24,34 @@ from flask_limiter.util import get_remote_address
 from stylometric_analyzer import analyze_stylometric
 from llm_classifier import analyze_llm, GroqUnavailable
 from confidence_scorer import combine, verdict_tier
-from audit_log import init_db, log_decision, get_recent_entries
+from label_generator import make_label
+from audit_log import (
+    init_db,
+    log_decision,
+    log_appeal,
+    update_status,
+    get_recent_entries,
+    get_submission,
+)
 
 app = Flask(__name__)
 
-# Rate limiting. Limits chosen for M5 — see README for justification.
+# Rate limiting. See README for justification of the chosen limits.
+# storage_uri="memory://" silences the Flask-Limiter ≥3.x warning about
+# implicit in-memory storage (per M5 spec setup note).
 limiter = Limiter(
-    key_func=get_remote_address,
+    get_remote_address,
     app=app,
     default_limits=[],
+    storage_uri="memory://",
 )
 
 init_db()
 
 
+# ---- POST /submit ----------------------------------------------------------
 @app.route("/submit", methods=["POST"])
-@limiter.limit("10 per minute; 100 per hour")
+@limiter.limit("10 per minute; 100 per day")
 def submit():
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
@@ -47,7 +60,7 @@ def submit():
 
     creator_id = data.get("creator_id") or "anonymous"
 
-    # --- Signal 1: stylometric (local, fast) ---
+    # --- Signal 1: stylometric ---
     styl_result = analyze_stylometric(text)
     styl_score = styl_result["score"]
 
@@ -62,22 +75,18 @@ def submit():
     except GroqUnavailable as e:
         llm_error = str(e)
 
-    # --- Combine + verdict ---
+    # --- Combine + verdict + label ---
     if llm_score is not None:
         confidence = combine(styl_score, llm_score)
         attribution = verdict_tier(confidence)
-        fallback_note = ""
     else:
-        # Fallback per planning.md §1: stylometric-only + force uncertain.
+        # Fallback per planning.md §1: stylometric-only + forced uncertain.
         confidence = round(styl_score, 3)
         attribution = "uncertain"
-        fallback_note = f" (LLM unavailable: {llm_error}; verdict forced to uncertain)"
 
-    # M4 placeholder label. M5 will replace with the §3 variants.
-    label = (
-        f"[M4 PLACEHOLDER - to be replaced in M5] "
-        f"attribution={attribution}, confidence={confidence:.2f}{fallback_note}"
-    )
+    label = make_label(attribution, confidence)
+    if llm_error:
+        label += f"\n\n[Note: LLM signal unavailable ({llm_error}); verdict based on stylometric only.]"
 
     content_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -96,7 +105,7 @@ def submit():
         llm_rationale=llm_rationale,
     )
 
-    response_body = {
+    return jsonify({
         "content_id": content_id,
         "creator_id": creator_id,
         "timestamp": timestamp,
@@ -116,17 +125,69 @@ def submit():
             },
         },
         "status": "classified",
-    }
-    return jsonify(response_body), 200
+    }), 200
 
 
+# ---- POST /appeal ----------------------------------------------------------
+@app.route("/appeal", methods=["POST"])
+def appeal():
+    data = request.get_json(silent=True) or {}
+    content_id = (data.get("content_id") or "").strip()
+    creator_reasoning = (data.get("creator_reasoning") or "").strip()
+
+    if not content_id:
+        return jsonify({"error": "field 'content_id' is required"}), 400
+    if not creator_reasoning:
+        return jsonify({"error": "field 'creator_reasoning' is required"}), 400
+
+    original = get_submission(content_id)
+    if original is None:
+        return jsonify({
+            "error": f"submission '{content_id}' not found in audit log",
+        }), 404
+
+    appeal_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    # Per planning.md §4:
+    #   1) update the decision row's status to "under_review"
+    #   2) insert a new appeal row (original verdict PRESERVED unmodified)
+    update_status(content_id, "under_review")
+    log_appeal(
+        appeal_id=appeal_id,
+        content_id=content_id,
+        creator_id=original.get("creator_id", "anonymous"),
+        timestamp=timestamp,
+        reasoning=creator_reasoning,
+    )
+
+    return jsonify({
+        "appeal_id": appeal_id,
+        "content_id": content_id,
+        "status": "under_review",
+        "timestamp": timestamp,
+        "message": "Appeal received and logged. A human reviewer will follow up.",
+    }), 200
+
+
+# ---- GET /log --------------------------------------------------------------
 @app.route("/log", methods=["GET"])
 def log():
-    """Return the most recent audit entries. No auth in v1 — grading-only."""
+    """Return audit entries newest-first. No auth in v1 — grading-only."""
     entries = get_recent_entries(limit=50)
     return jsonify({"entries": entries, "count": len(entries)}), 200
 
 
+# ---- GET /submission/<id> --------------------------------------------------
+@app.route("/submission/<content_id>", methods=["GET"])
+def submission_detail(content_id):
+    entry = get_submission(content_id)
+    if entry is None:
+        return jsonify({"error": f"submission '{content_id}' not found"}), 404
+    return jsonify(entry), 200
+
+
+# ---- 429 handler -----------------------------------------------------------
 @app.errorhandler(429)
 def ratelimit_handler(e):
     return jsonify({
