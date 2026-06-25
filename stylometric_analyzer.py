@@ -29,7 +29,10 @@ TTR_HUMAN_ANCHOR = 0.65          # ttr at/above this → score 0 contribution
 TTR_RANGE = 0.25                 # span we normalize TTR over (0.40 - 0.65)
 
 # Minimum content size to consider stylometric analysis reliable.
-MIN_WORDS_FOR_FULL_SIGNAL = 50
+# Word threshold is lenient (30) because the real safety check is the
+# sentence-count threshold below — burstiness is only meaningful with
+# at least 3 sentences to take variance over.
+MIN_WORDS_FOR_FULL_SIGNAL = 30
 MIN_SENTENCES_FOR_VARIANCE = 3
 
 

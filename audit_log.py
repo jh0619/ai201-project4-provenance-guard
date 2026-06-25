@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     confidence          REAL,                     -- combined score in [0, 1]
     stylometric_score   REAL,
     llm_score           REAL,                     -- populated starting M4
+    llm_rationale       TEXT,                     -- short reason from LLM (M4+)
     features_json       TEXT,                     -- raw stylometric features
     label               TEXT,
     status              TEXT,                     -- 'classified' | 'under_review'
@@ -43,6 +44,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_content_id ON audit_log(content_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
 """
+
+# Columns added after M3. ALTER TABLE makes startup idempotent for users
+# upgrading from an existing M3 database (CREATE TABLE IF NOT EXISTS would
+# skip the new column).
+_M4_NEW_COLUMNS = [
+    ("llm_rationale", "TEXT"),
+]
 
 
 @contextmanager
@@ -57,9 +65,18 @@ def _conn():
 
 
 def init_db() -> None:
-    """Create the schema if it doesn't exist. Safe to call on every startup."""
+    """Create the schema if it doesn't exist. Safe to call on every startup.
+
+    Also applies any post-M3 column migrations idempotently.
+    """
     with _conn() as c:
         c.executescript(SCHEMA)
+        # Idempotent migrations for users upgrading from M3.
+        for col_name, col_type in _M4_NEW_COLUMNS:
+            try:
+                c.execute(f"ALTER TABLE audit_log ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 def log_decision(
@@ -74,20 +91,27 @@ def log_decision(
     label: str,
     status: str = "classified",
     llm_score: Optional[float] = None,
+    llm_rationale: Optional[str] = None,
 ) -> None:
-    """Insert a decision row. llm_score is None in M3, populated in M4."""
+    """Insert a decision row.
+
+    llm_score and llm_rationale are None when the LLM signal was unavailable
+    (the fallback path; verdict is forced to 'uncertain' upstream).
+    """
     with _conn() as c:
         c.execute(
             """
             INSERT INTO audit_log (
                 entry_type, content_id, creator_id, timestamp,
-                attribution, confidence, stylometric_score, llm_score,
+                attribution, confidence, stylometric_score,
+                llm_score, llm_rationale,
                 features_json, label, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "decision", content_id, creator_id, timestamp,
-                attribution, confidence, stylometric_score, llm_score,
+                attribution, confidence, stylometric_score,
+                llm_score, llm_rationale,
                 json.dumps(stylometric_features), label, status,
             ),
         )

@@ -97,10 +97,12 @@ A false positive on a writing platform — calling a human's work AI-generated �
 | `combined_score` range | Verdict tier | Label slot                  |
 | ---------------------- | ------------ | --------------------------- |
 | `≤ 0.25`               | `human`      | "Likely written by a human" |
-| `0.25 – 0.80`          | `uncertain`  | "Inconclusive"              |
-| `> 0.80`               | `ai`         | "Likely AI-generated"       |
+| `0.25 – 0.70`          | `uncertain`  | "Inconclusive"              |
+| `> 0.70`               | `ai`         | "Likely AI-generated"       |
 
-The `uncertain` band is deliberately wide (0.55 of the total range). The `ai` band requires a high bar (only `>0.80`) — both signals must agree strongly before we make an accusation. The `human` band is more permissive (≤0.25) because mislabeling AI as human is less harmful than the reverse.
+The `uncertain` band is deliberately wide (0.45 of the total range). The `ai` band requires a high bar — both signals must agree strongly before we make an accusation. The `human` band is more permissive (≤0.25) because mislabeling AI as human is less harmful than the reverse.
+
+**Calibration note (M4).** The AI threshold was originally `>0.80`. After running the 5-sample calibration test in M4, that bar proved unreachable for realistic two-signal outputs — even a strongly AI-looking text with `stylometric=0.39` and a confident `llm=0.95` only reached `combined=0.728`. Lowering to `>0.70` keeps the asymmetry (the AI side is still nearly 3× the human side) while making the AI verdict actually attainable on clearly-AI content.
 
 ### Verifying the score is meaningful
 
@@ -120,14 +122,14 @@ Below are the **verbatim** label texts for all three variants. `{N}` is the AI-l
 > Our detector found the variation in sentence rhythm and word choice that is typical of human writing.
 > AI-likelihood score: {N}% (low confidence in AI)
 
-### Variant 2 — `uncertain` (0.25 < combined_score ≤ 0.80)
+### Variant 2 — `uncertain` (0.25 < combined_score ≤ 0.70)
 
 > **Inconclusive.**
 > Our detector found mixed signals — some patterns look human, others look AI-generated. We are not confident either way; treat this result as undetermined.
 > AI-likelihood score: {N}%
 > If you are the creator and believe a clearer determination should have been made, you can appeal.
 
-### Variant 3 — `ai` (combined_score > 0.80)
+### Variant 3 — `ai` (combined_score > 0.70)
 
 > **Likely AI-generated.**
 > Our detector found strong signals — uniform sentence structure, generic phrasing — that suggest this content was produced by an AI model.
@@ -456,3 +458,15 @@ No request body. Response is an array of audit log entries, newest-first.
 No request body. Returns the full decision record for one submission, or `404`.
 
 ---
+
+## Checkpoint (Milestone 2)
+
+- [x] §1 answers what each signal measures, output shape, and how they combine.
+- [x] §2 defines what `0.6` means, how scores map, and the three threshold ranges.
+- [x] §3 contains verbatim text for all three label variants.
+- [x] §4 defines who can appeal, what they provide, what the system does, and what a reviewer would see.
+- [x] §5 names four specific edge cases (spec required two).
+- [x] `## Architecture` has the M1 diagram and a 2–3 sentence narrative.
+- [x] `## AI Tool Plan` covers M3/M4/M5 with sections, requests, and verification steps.
+
+Ready to move to Milestone 3 (implementation).
